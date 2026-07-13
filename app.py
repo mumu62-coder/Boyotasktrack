@@ -547,10 +547,20 @@ def save_tasks(tasks, settings):
         json.dump(tasks, f, ensure_ascii=False, indent=2)
     
     if settings.get("gas_url"):
+        # Serialize list columns to JSON strings for Google Sheets
+        serializable_tasks = []
+        for t in tasks:
+            tc = t.copy()
+            if "meeting_history" in tc and isinstance(tc["meeting_history"], list):
+                tc["meeting_history"] = json.dumps(tc["meeting_history"], ensure_ascii=False)
+            if "progress_history" in tc and isinstance(tc["progress_history"], list):
+                tc["progress_history"] = json.dumps(tc["progress_history"], ensure_ascii=False)
+            serializable_tasks.append(tc)
+            
         try:
             response = requests.post(
                 settings["gas_url"],
-                json=tasks,
+                json=serializable_tasks,
                 headers={"Content-Type": "application/json"},
                 timeout=10
             )
