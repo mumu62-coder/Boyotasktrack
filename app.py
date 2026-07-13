@@ -492,6 +492,20 @@ def load_tasks(settings):
     # Migrate Schema dynamically (Self-healing data structure)
     migrated = False
     for t in raw_tasks:
+        # Parse history strings from Google Sheets CSV
+        if isinstance(t.get("meeting_history"), str):
+            try:
+                import json
+                t["meeting_history"] = json.loads(t["meeting_history"])
+            except Exception as e:
+                pass
+        if isinstance(t.get("progress_history"), str):
+            try:
+                import json
+                t["progress_history"] = json.loads(t["progress_history"])
+            except Exception as e:
+                pass
+
         if "meeting_history" not in t or not isinstance(t["meeting_history"], list):
             t["meeting_history"] = [{
                 "meeting": t.get("meeting", "策略發展會議"),
@@ -505,7 +519,12 @@ def load_tasks(settings):
                 "text": t.get("progress", "建立追蹤")
             }]
             migrated = True
-        if "is_cross_dept" not in t:
+        if "is_cross_dept" in t:
+            val = t["is_cross_dept"]
+            if isinstance(val, str):
+                t["is_cross_dept"] = val.strip().lower() in ["true", "1", "yes", "t"]
+                migrated = True
+        else:
             is_cross = False
             for word in ["跨部門", "跨組", "跨單位", "協辦"]:
                 if word in t.get("title", "") or word in t.get("content", ""):
