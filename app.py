@@ -152,8 +152,8 @@ def parse_docx_to_tasks(file_bytes, filename):
                     owner = cells[owner_idx] if (owner_idx != -1 and owner_idx < len(cells)) else (dept_text or "待指派")
                     
                     is_cross = False
-                    for d_name in ["教材", "特教", "學區", "畢業生", "處長", "行政"]:
-                        if d_name in title and d_name not in detected_dept:
+                    for word in ["跨部門", "跨組", "跨單位", "協辦"]:
+                        if word in title or word in (progress or ""):
                             is_cross = True
                     
                     parsed.append({
@@ -507,7 +507,7 @@ def load_tasks(settings):
             migrated = True
         if "is_cross_dept" not in t:
             is_cross = False
-            for word in ["跨部門", "跨組", "跨單位", "協辦", "串接", "合作", "共同"]:
+            for word in ["跨部門", "跨組", "跨單位", "協辦"]:
                 if word in t.get("title", "") or word in t.get("content", ""):
                     is_cross = True
             t["is_cross_dept"] = is_cross
@@ -932,12 +932,6 @@ with tab_kanban:
                 progress_history_html = "".join([f'<div style="margin-bottom:4px; padding-bottom:4px; border-bottom:1px dashed var(--border-color);"><b>{html_escape(ph.get("date"))}</b>: {html_escape(ph.get("text"))}</div>' for ph in ph_list])
 
                 cross_suggestion_html = ""
-                if t.get("is_cross_dept"):
-                    cross_suggestion_html = """
-                    <div style="background: rgba(244,63,94,0.03); border: 1px solid rgba(244,63,94,0.15); padding: 8px 10px; border-radius: 6px; font-size: 11px; margin-top: 8px; color: #F43F5E; line-height: 1.45;">
-                        🤝 <b>跨部門協作指引：</b>該項目涉及多個部門，請指定單一組別作為主要協調窗口。建議將里程碑拆解至各組，並於主管會議進行雙向對齊與時間軸確認，防堵責任分散。
-                    </div>
-                    """
 
                 title_class = "card-title-completed" if t.get("status") == "completed" else "card-title"
 
@@ -953,7 +947,6 @@ with tab_kanban:
                     <b>最新進度：</b>{esc_progress}
                 </div>
                 
-                {cross_suggestion_html}
                 
                 <div style="margin-top: 8px; border-top: 1px solid var(--border-color); padding-top: 8px;">
                     <details style="cursor: pointer; margin-bottom: 6px;">
@@ -1360,71 +1353,46 @@ with tab_parser:
             else:
                 st.warning("請至少勾選一項進行匯入！")
 
-# ---- TAB 3: 業務分類字典與協作指南 ----
+# ---- TAB 3: 業務分類字典 ----
 with tab_dictionary:
-    sub_dict, sub_guide = st.tabs(["📖 各部門業務分類字典", "🤝 跨部門行政協作指南"])
-    
-    with sub_dict:
-        st.markdown("本字典定義了教育輔導處各組別的核心業務，系統在匯入新會議紀錄時會自動參照本字典的關鍵字進行分類。")
-        dictionary_data = [
-            {
-                "name": "4.1 處長室 / 跨部門協調",
-                "desc": "規劃制定教育輔導相關服務的總體策略，預算與資源分配管理，帶領處內各組達成年度工作目標，督導與跨部門行政事務協調。",
-                "items": ["A. 瞭解趨勢，制定服務總體策略", "B. 監督與提供內部績效評估及優化建議", "C. 督導處內組長、教育訓練規劃", "D. 管理預算與資源", "E. 跨部門教育輔導事宜協調與管理"]
-            },
-            {
-                "name": "4.2 教材研發編輯組",
-                "desc": "研發與優化博幼教材（英文、數學、閱讀、科普、程式設計），教材版面設計與排版，組織在學生多元學習活動，推廣 PASSION 英文種子教師觀議課機制。",
-                "items": ["A. 研發編輯、出版課輔教材與檢測卷", "B. 收集現場教材反饋並改進成效", "C. 教材美編、版面設計與印刷前置", "D. 策劃全機構在學生多元學習活動", "E. 辦理課輔老師英數檢測與培訓認證", "F. 推行 PASSION 英文種子老師觀議課加給"]
-            },
-            {
-                "name": "4.3 社會工作暨特殊教育發展組",
-                "desc": "綜理機構社會工作與特殊教育的制度規劃與執行，輔導特殊需求學生成效評估。提供高關懷學生處遇追蹤、國三畢業典禮籌備，管理急難救助金（李醒嘉安心基金）與早療實驗計畫。",
-                "items": ["A. 倡議與建置社工督導及增能課程", "B. 提供高關懷學生追蹤處遇與外部資源連結", "C. 特殊需求學生資格評估與輔導成效追蹤", "D. 研發特教生教案設計（生活管理、人際、專注力）", "E. 執行傳善獎早療實驗計畫、早療平台與小手計畫", "F. 統籌國三畢業典禮，審核與發放李醒嘉安心基金"]
-            },
-            {
-                "name": "4.4 學區營運發展組",
-                "desc": "綜理課輔中心學區營運、課輔老師招募及考評調薪。追蹤與分析學區教學品質、學生會考及檢測成績，系統開發（學生與成績系統），以及建構數位學習平台（均一）任務學習模式與手冊大綱。",
-                "items": ["A. 制定課輔中心學區運作制度與課師培訓考核", "B. 追蹤分析教學品質與學生檢測通過率、會考表現", "C. 教育輔導處資訊系統（成績/學生資料）評估維護", "D. 優化線上及紙本週誌填寫，降低課師行政壓力", "E. 執行尖前中心數位平台（均一）任務學習實驗計畫與手冊大綱"]
-            },
-            {
-                "name": "4.5 畢業生追蹤服務規劃組",
-                "desc": "綜理博幼大專與高中職畢業生輔導、升學與就業規劃，申辦與發放各大企業與內部生活助學金，定期追蹤在校成績，並組織實施寒暑假返鄉志工服務機制。",
-                "items": ["A. 規劃與管理畢業生高關懷制度，協助評估與輔導", "B. 經營畢業生組織（學生會）運作、辦理幹訓與活動", "C. 追蹤畢業生高中職、大專端就學成績與適應情況", "D. 統籌各大專與高中職獎助學金申請、審核與分攤核銷", "E. 審查補習/家教申請，媒合企業職缺與友善企業合作", "F. 畢業生翻譯培力、寒暑假回娘家活動統籌"]
-            }
-        ]
+    st.markdown("### 📖 各部門業務分類字典")
+    st.markdown("本字典定義了教育輔導處各組別的核心業務，系統在匯入新會議紀錄時會自動參照本字典的關鍵字進行分類。")
+    dictionary_data = [
+        {
+            "name": "4.1 處長室 / 跨部門協調",
+            "desc": "規劃制定教育輔導相關服務的總體策略，預算與資源分配管理，帶領處內各組達成年度工作目標，督導與跨部門行政事務協調。",
+            "items": ["A. 瞭解趨勢，制定服務總體策略", "B. 監督與提供內部績效評估及優化建議", "C. 督導處內組長、教育訓練規劃", "D. 管理預算與資源", "E. 跨部門教育輔導事宜協調與管理"]
+        },
+        {
+            "name": "4.2 教材研發編輯組",
+            "desc": "研發與優化博幼教材（英文、數學、閱讀、科普、程式設計），教材版面設計與排版，組織在學生多元學習活動，推廣 PASSION 英文種子教師觀議課機制。",
+            "items": ["A. 研發編輯、出版課輔教材與檢測卷", "B. 收集現場教材反饋並改進成效", "C. 教材美編、版面設計與印刷前置", "D. 策劃全機構在學生多元學習活動", "E. 辦理課輔老師英數檢測與培訓認證", "F. 推行 PASSION 英文種子老師觀議課加給"]
+        },
+        {
+            "name": "4.3 社會工作暨特殊教育發展組",
+            "desc": "綜理機構社會工作與特殊教育的制度規劃與執行，輔導特殊需求學生成效評估。提供高關懷學生處遇追蹤、國三畢業典禮籌備，管理急難救助金（李醒嘉安心基金）與早療實驗計畫。",
+            "items": ["A. 倡議與建置社工督導及增能課程", "B. 提供高關懷學生追蹤處遇與外部資源連結", "C. 特殊需求學生資格評估與輔導成效追蹤", "D. 研發特教生教案設計（生活管理、人際、專注力）", "E. 執行傳善獎早療實驗計畫、早療平台與小手計畫", "F. 統籌國三畢業典禮，審核與發放李醒嘉安心基金"]
+        },
+        {
+            "name": "4.4 學區營運發展組",
+            "desc": "綜理課輔中心學區營運、課輔老師招募及考評調薪。追蹤與分析學區教學品質、學生會考及檢測成績，系統開發（學生與成績系統），以及建構數位學習平台（均一）任務學習模式與手冊大綱。",
+            "items": ["A. 制定課輔中心學區運作制度與課師培訓考核", "B. 追蹤分析教學品質與學生檢測通過率、會考表現", "C. 教育輔導處資訊系統（成績/學生資料）評估維護", "D. 優化線上及紙本週誌填寫，降低課師行政壓力", "E. 執行尖前中心數位平台（均一）任務學習實驗計畫與手冊大綱"]
+        },
+        {
+            "name": "4.5 畢業生追蹤服務規劃組",
+            "desc": "綜理博幼大專與高中職畢業生輔導、升學與就業規劃，申辦與發放各大企業與內部生活助學金，定期追蹤在校成績，並組織實施寒暑假返鄉志工服務機制。",
+            "items": ["A. 規劃與管理畢業生高關懷制度，協助評估與輔導", "B. 經營畢業生組織（學生會）運作、辦理幹訓與活動", "C. 追蹤畢業生高中職、大專端就學成績與適應情況", "D. 統籌各大專與高中職獎助學金申請、審核與分攤核銷", "E. 審查補習/家教申請，媒合企業職缺與友善企業合作", "F. 畢業生翻譯培力、寒暑假回娘家活動統籌"]
+        }
+    ]
 
-        for dept in dictionary_data:
-            st.markdown(f"#### 👤 {dept['name']}")
-            st.markdown(clean_html(f"<div style='font-size: 12px; color: var(--text-muted); background: var(--card-bg); padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 8px;'>{dept['desc']}</div>"), unsafe_allow_html=True)
-            cols = st.columns(3)
-            for i, item in enumerate(dept['items']):
-                with cols[i % 3]:
-                    st.markdown(clean_html(f"<div style='font-size: 11px; padding: 4px 8px; margin-bottom: 4px; border-left: 2px solid #10B981; color: var(--text);'>{item}</div>"), unsafe_allow_html=True)
-            st.markdown("---")
-            
-    with sub_guide:
-        st.markdown("### 🤝 跨部門/跨組別行政協作最佳實踐指南")
-        st.markdown("教育輔導處專案多涉及跨組別協作，為防堵因職責不清導致專案延宕，行政幕僚建議採取以下標準程序：")
-        
-        st.markdown("""
-        #### 1. 🥇 堅持「單一窗口主責制」(Lead Owner)
-        * **原則**：儘管任務需要多個組別共同參與，**必須指定一個組別為主責窗口**（在系統中設為 `主責對口`）。
-        * **作用**：主責對口負責主持專案推進、統籌工作會議、以及對外溝通. 協辦組別僅對主責組別負責，防止「大家都負責，等於大家都不負責」的責任分散效應。
-
-        #### 2. 📅 拆解並明訂「交接點里程碑」(Handoff Milestones)
-        * **方法**：主責組別應將協作內容拆解，約定清晰的輸入、輸出與具體期限。
-        * *範例：【教材編修專案】*
-          1. **教材研發組** ➔ 於 7/15 交付教案初稿。
-          2. **社工特教組** ➔ 於 7/22 完成特教化與特殊管理教案修訂。
-          3. **學區營運組** ➔ 於 7/29 派發給課輔中心試教。
-
-        #### 3. 🎯 主管會議「雙向進度對齊」(Sync Point)
-        * **做法**：凡是標有 **🤝 跨部門** 標籤的任務，行政幕僚應在每週二的主管會議中主動提出對齊，要求主責窗口與協辦窗口現場確認進度瓶頸。
-
-        #### 4. 🔀 衝突與資源協調路徑 (Escalation Path)
-        * **路徑**：若協作過程中發生組別間人力短缺或進度衝突，應立即呈報 **處長室/行政管理** 進行資源裁決與調度，避免組別間擱置任務。
-        """)
+    for dept in dictionary_data:
+        st.markdown(f"#### 👤 {dept['name']}")
+        st.markdown(clean_html(f"<div style='font-size: 12px; color: var(--text-muted); background: var(--card-bg); padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 8px;'>{dept['desc']}</div>"), unsafe_allow_html=True)
+        cols = st.columns(3)
+        for i, item in enumerate(dept['items']):
+            with cols[i % 3]:
+                st.markdown(clean_html(f"<div style='font-size: 11px; padding: 4px 8px; margin-bottom: 4px; border-left: 2px solid #10B981; color: var(--text);'>{item}</div>"), unsafe_allow_html=True)
+        st.markdown("---")
 
 # ---- TAB 4: 歷史歸檔檔案庫 (Scheme A implementation) ----
 with tab_archive:
