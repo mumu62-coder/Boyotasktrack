@@ -524,6 +524,12 @@ def load_tasks(settings):
             if isinstance(val, str):
                 t["is_cross_dept"] = val.strip().lower() in ["true", "1", "yes", "t"]
                 migrated = True
+            elif isinstance(val, float):
+                import math
+                t["is_cross_dept"] = bool(val) and not math.isnan(val)
+                migrated = True
+            else:
+                t["is_cross_dept"] = bool(val)
         else:
             is_cross = False
             for word in ["跨部門", "跨組", "跨單位", "協辦"]:
