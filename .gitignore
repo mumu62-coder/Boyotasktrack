@@ -1,0 +1,20 @@
+# 本地設定與敏感任務資料庫 (重要機密)
+settings.json
+tasks.json
+
+# Python 快取與虛擬環境
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+venv/
+.venv/
+env/
+.env
+
+# 編輯器與系統暫存
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
