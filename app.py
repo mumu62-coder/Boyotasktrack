@@ -140,60 +140,69 @@ def parse_docx_to_tasks(file_bytes, filename):
         
         if title_idx != -1:
             for row_idx in range(1, len(rows)):
-                cells = [c.text.strip() for c in rows[row_idx].cells]
-                if len(cells) <= title_idx:
+                try:
+                    cells = [c.text.strip() for c in rows[row_idx].cells]
+                    if len(cells) <= title_idx:
+                        continue
+                    title = cells[title_idx]
+                    
+                    if title and len(title) > 5 and "說明：" not in title:
+                        dept_text = cells[dept_idx] if (dept_idx != -1 and dept_idx < len(cells)) else ""
+                        detected_dept = detect_department(dept_text + " " + title)
+                        progress = cells[progress_idx] if (progress_idx != -1 and progress_idx < len(cells)) else ""
+                        owner = cells[owner_idx] if (owner_idx != -1 and owner_idx < len(cells)) else (dept_text or "待指派")
+                        
+                        is_cross = False
+                        for word in ["跨部門", "跨組", "跨單位", "協辦"]:
+                            if word in title or word in (progress or ""):
+                                is_cross = True
+                        
+                        parsed.append({
+                            "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-{table_idx}-{row_idx}",
+                            "title": title[:80] + "..." if len(title) > 80 else title,
+                            "dept": detected_dept,
+                            "owner": owner,
+                            "meeting": filename.replace(".docx", ""),
+                            "date": meeting_date,
+                            "status": "completed" if ("完成" in progress or "100%" in progress) else "in_progress",
+                            "priority": "high" if ("高" in title or "立刻" in title) else "medium",
+                            "content": title,
+                            "progress": progress or "自會議記錄匯入",
+                            "is_cross_dept": is_cross
+                        })
+                except Exception as e:
+                    import logging
+                    logging.warning(f"Failed to parse table row {row_idx} in table {table_idx}: {str(e)}")
                     continue
-                title = cells[title_idx]
-                
-                if title and len(title) > 5 and "說明：" not in title:
-                    dept_text = cells[dept_idx] if (dept_idx != -1 and dept_idx < len(cells)) else ""
-                    detected_dept = detect_department(dept_text + " " + title)
-                    progress = cells[progress_idx] if (progress_idx != -1 and progress_idx < len(cells)) else ""
-                    owner = cells[owner_idx] if (owner_idx != -1 and owner_idx < len(cells)) else (dept_text or "待指派")
-                    
-                    is_cross = False
-                    for word in ["跨部門", "跨組", "跨單位", "協辦"]:
-                        if word in title or word in (progress or ""):
-                            is_cross = True
-                    
-                    parsed.append({
-                        "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-{table_idx}-{row_idx}",
-                        "title": title[:80] + "..." if len(title) > 80 else title,
-                        "dept": detected_dept,
-                        "owner": owner,
-                        "meeting": filename.replace(".docx", ""),
-                        "date": meeting_date,
-                        "status": "completed" if ("完成" in progress or "100%" in progress) else "in_progress",
-                        "priority": "high" if ("高" in title or "立刻" in title) else "medium",
-                        "content": title,
-                        "progress": progress or "自會議紀錄匯入",
-                        "is_cross_dept": is_cross
-                    })
     
     # 2. If no tables parsed, parse paragraphs line-by-line
     if not parsed:
         for p_idx, para in enumerate(doc.paragraphs):
-            text = para.text.strip()
-            if not text or len(text) < 10:
+            try:
+                text = para.text.strip()
+                if not text or len(text) < 10:
+                    continue
+                if text[0].isdigit() or text.startswith("-") or text.startswith("●"):
+                    detected_dept = detect_department(text)
+                    parsed.append({
+                        "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-p-{p_idx}",
+                        "title": text[:60] + "..." if len(text) > 60 else text,
+                        "dept": detected_dept,
+                        "owner": "待指派",
+                        "meeting": filename.replace(".docx", ""),
+                        "date": meeting_date,
+                        "status": "in_progress",
+                        "priority": "medium",
+                        "content": text,
+                        "progress": "自會議記錄文字段落提取",
+                        "is_cross_dept": False
+                    })
+            except Exception as e:
+                import logging
+                logging.warning(f"Failed to parse paragraph {p_idx}: {str(e)}")
                 continue
-            if text[0].isdigit() or text.startswith("-") or text.startswith("●"):
-                detected_dept = detect_department(text)
-                parsed.append({
-                    "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-p-{p_idx}",
-                    "title": text[:60] + "..." if len(text) > 60 else text,
-                    "dept": detected_dept,
-                    "owner": "待指派",
-                    "meeting": filename.replace(".docx", ""),
-                    "date": meeting_date,
-                    "status": "in_progress",
-                    "priority": "medium",
-                    "content": text,
-                    "progress": "自會議紀錄文字段落提取",
-                    "is_cross_dept": False
-                })
     return parsed
 
-# --- Security & Rendering Helpers (Senior Engineer Best Practices) ---
 def html_escape(text):
     """Prevent XSS and HTML layout breakage in markdown cards."""
     if not isinstance(text, str):
@@ -477,8 +486,7 @@ def load_tasks(settings):
                 df = df.astype(str).replace("nan", "")
                 raw_tasks = df.to_dict(orient="records")
                 # Write back as local cache for offline/resilience fallback
-                with open(LOCAL_DATA_FILE, "w", encoding="utf-8") as f:
-                    json.dump(raw_tasks, f, ensure_ascii=False, indent=2)
+                save_tasks_safely(raw_tasks, LOCAL_DATA_FILE)
             except Exception as e:
                 st.sidebar.error(f"⚠️ 無法讀取 Google 試算表，改為載入本地檔案。錯誤：{str(e)}")
 
@@ -540,47 +548,120 @@ def load_tasks(settings):
     
     if migrated and raw_tasks:
         try:
-            with open(LOCAL_DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(raw_tasks, f, ensure_ascii=False, indent=2)
+            save_tasks_safely(raw_tasks, LOCAL_DATA_FILE)
+        except:
+            pass
+            
+    # Background retry queue: check if any tasks have sync_pending == True
+    # And try to sync them now!
+    gas_url = settings.get("gas_url")
+    if gas_url and any(t.get("sync_pending") for t in raw_tasks):
+        pending_tasks = [t for t in raw_tasks if t.get("sync_pending")]
+        try:
+            serializable_pending = []
+            for t in pending_tasks:
+                tc = t.copy()
+                tc.pop("sync_pending", None)
+                if "meeting_history" in tc and isinstance(tc["meeting_history"], list):
+                    tc["meeting_history"] = json.dumps(tc["meeting_history"], ensure_ascii=False)
+                if "progress_history" in tc and isinstance(tc["progress_history"], list):
+                    tc["progress_history"] = json.dumps(tc["progress_history"], ensure_ascii=False)
+                serializable_pending.append(tc)
+                
+            response = requests.post(
+                gas_url,
+                json=serializable_pending,
+                headers={"Content-Type": "application/json"},
+                timeout=5
+            )
+            if response.status_code == 200:
+                for t in pending_tasks:
+                    t["sync_pending"] = False
+                save_tasks_safely(raw_tasks, LOCAL_DATA_FILE)
+                st.sidebar.success("✅ 成功補齊先前漏接的進度！")
         except:
             pass
 
     return raw_tasks
 
+# Save Tasks Safely (Atomic Write)
+def save_tasks_safely(tasks, filepath):
+    import tempfile
+    fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(filepath)))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(tasks, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, filepath)
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise e
+
 # Save Tasks
-def save_tasks(tasks, settings):
-    with open(LOCAL_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2)
+def save_tasks(tasks, settings, modified_tasks=None):
+    # 1. Always save raw tasks locally first (atomic save)
+    save_tasks_safely(tasks, LOCAL_DATA_FILE)
     
-    if settings.get("gas_url"):
-        # Serialize list columns to JSON strings for Google Sheets
-        serializable_tasks = []
-        for t in tasks:
-            tc = t.copy()
-            if "meeting_history" in tc and isinstance(tc["meeting_history"], list):
-                tc["meeting_history"] = json.dumps(tc["meeting_history"], ensure_ascii=False)
-            if "progress_history" in tc and isinstance(tc["progress_history"], list):
-                tc["progress_history"] = json.dumps(tc["progress_history"], ensure_ascii=False)
-            serializable_tasks.append(tc)
-            
-        try:
-            response = requests.post(
-                settings["gas_url"],
-                json=serializable_tasks,
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            if response.status_code == 200:
-                st.sidebar.success("✅ 雲端 Google Sheets 同步成功！")
-            else:
-                st.sidebar.error("❌ 雲端同步失敗，請檢查 Google Apps Script 設定。")
-        except Exception as e:
-            st.sidebar.error(f"❌ 雲端同步超時或出錯：{str(e)}")
+    # 2. Check if cloud sync is configured
+    gas_url = settings.get("gas_url")
+    if not gas_url:
+        return
+        
+    # If modified_tasks is [] (empty list), it means we only want to write locally (e.g. after deletion)
+    if modified_tasks == []:
+        return
+
+    # Determine what to send (None = all tasks, otherwise modified_tasks)
+    tasks_to_send = tasks if modified_tasks is None else modified_tasks
+    
+    # Mark them all as sync_pending = True in the actual tasks list
+    for t in tasks_to_send:
+        t["sync_pending"] = True
+    
+    # Save the pending state locally
+    save_tasks_safely(tasks, LOCAL_DATA_FILE)
+    
+    # Serialize complex columns to JSON strings for Google Sheets
+    serializable_tasks = []
+    for t in tasks_to_send:
+        tc = t.copy()
+        tc.pop("sync_pending", None)
+        if "meeting_history" in tc and isinstance(tc["meeting_history"], list):
+            tc["meeting_history"] = json.dumps(tc["meeting_history"], ensure_ascii=False)
+        if "progress_history" in tc and isinstance(tc["progress_history"], list):
+            tc["progress_history"] = json.dumps(tc["progress_history"], ensure_ascii=False)
+        serializable_tasks.append(tc)
+        
+    try:
+        response = requests.post(
+            gas_url,
+            json=serializable_tasks,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        if response.status_code == 200:
+            # Sync succeeded! Clear the sync_pending flag
+            for t in tasks_to_send:
+                t["sync_pending"] = False
+            # Save the cleared state locally
+            save_tasks_safely(tasks, LOCAL_DATA_FILE)
+            st.sidebar.success("✅ 雲端 Google Sheets 同步成功！")
+        else:
+            st.sidebar.error("❌ 雲端同步失敗，已排入重試佇列。")
+    except Exception as e:
+        st.sidebar.error(f"⚠️ 網路超時或斷線，已排入重試佇列。")
 
 # Initialize data
 settings = load_settings()
 if "tasks" not in st.session_state:
     st.session_state.tasks = load_tasks(settings)
+
+if "limit_pending" not in st.session_state:
+    st.session_state.limit_pending = 20
+if "limit_progress" not in st.session_state:
+    st.session_state.limit_progress = 20
+if "limit_completed" not in st.session_state:
+    st.session_state.limit_completed = 20
 
 # Refresh helper
 def refresh_data():
@@ -749,14 +830,16 @@ if hasattr(st, "dialog"):
                         st.session_state.tasks[idx] = task
                         break
                 
-                save_tasks(st.session_state.tasks, settings)
+                save_tasks(st.session_state.tasks, settings, modified_tasks=[task])
                 st.success("✅ 儲存成功！")
                 st.rerun()
                 
         with col_c2:
             if st.button("🗑️ 刪除此項任務", type="secondary", use_container_width=True):
+                task["status"] = "deleted"
+                save_tasks(st.session_state.tasks, settings, modified_tasks=[task])
                 st.session_state.tasks = [t for t in st.session_state.tasks if t["id"] != task["id"]]
-                save_tasks(st.session_state.tasks, settings)
+                save_tasks(st.session_state.tasks, settings, modified_tasks=[])
                 st.warning("⚠️ 任務已從追蹤清單中刪除。")
                 st.rerun()
 
@@ -792,7 +875,7 @@ if hasattr(st, "dialog"):
                             if t["id"] == task["id"]:
                                 st.session_state.tasks[idx] = task
                                 break
-                        save_tasks(st.session_state.tasks, settings)
+                        save_tasks(st.session_state.tasks, settings, modified_tasks=[task])
                         st.success("✅ 已復原進度狀態！")
                         st.rerun()
         else:
@@ -841,7 +924,7 @@ else:
                 if t["id"] == task["id"]:
                     st.session_state.tasks[idx] = task
                     break
-            save_tasks(st.session_state.tasks, settings)
+            save_tasks(st.session_state.tasks, settings, modified_tasks=[task])
             st.rerun()
 
 # ---- DIALOG: CREATE TASK ----
@@ -894,7 +977,7 @@ if hasattr(st, "dialog"):
                     }]
                 }
                 st.session_state.tasks.insert(0, new_item)
-                save_tasks(st.session_state.tasks, settings)
+                save_tasks(st.session_state.tasks, settings, modified_tasks=[new_item])
                 st.success(f"✅ 成功手動新增任務：{nt_title}")
                 st.rerun()
 
@@ -921,8 +1004,21 @@ with tab_kanban:
             else:
                 st.info("請到側邊欄填寫新增任務")
 
-    # Exclude archived tasks from main Kanban board and active overview table
-    kanban_tasks = [t for t in filtered_tasks if t.get("status") != "archived"]
+    # Exclude archived tasks and completed tasks older than 3 months from main Kanban board and active overview table
+    import pandas as pd
+    kanban_tasks = []
+    for t in filtered_tasks:
+        if t.get("status") == "archived":
+            continue
+        if t.get("status") == "completed":
+            try:
+                task_date = pd.to_datetime(t.get("date", ""), format="%Y.%m.%d")
+                three_months_ago = pd.Timestamp.now() - pd.DateOffset(months=3)
+                if task_date < three_months_ago:
+                    continue
+            except:
+                pass
+        kanban_tasks.append(t)
     if selected_subgroup != "全部":
         kanban_tasks = [t for t in kanban_tasks if t.get("dept") == selected_subgroup]
 
@@ -1018,7 +1114,7 @@ with tab_kanban:
                                 "date": t["date"],
                                 "text": "狀態更新：開始執行項目"
                             })
-                            save_tasks(st.session_state.tasks, settings)
+                            save_tasks(st.session_state.tasks, settings, modified_tasks=[t])
                             st.rerun()
                     elif t.get("status") == "in_progress":
                         if st.button("⏳ 移回待辦", key=f"revert_{t['id']}_{index_key}", use_container_width=True):
@@ -1029,7 +1125,7 @@ with tab_kanban:
                                 "date": t["date"],
                                 "text": "狀態更新：移回待辦狀態"
                             })
-                            save_tasks(st.session_state.tasks, settings)
+                            save_tasks(st.session_state.tasks, settings, modified_tasks=[t])
                             st.rerun()
                     elif t.get("status") == "completed":
                         if st.button("⚡ 重啟任務", key=f"reopen_{t['id']}_{index_key}", use_container_width=True):
@@ -1040,7 +1136,7 @@ with tab_kanban:
                                 "date": t["date"],
                                 "text": "狀態更新：重啟任務項目"
                             })
-                            save_tasks(st.session_state.tasks, settings)
+                            save_tasks(st.session_state.tasks, settings, modified_tasks=[t])
                             st.rerun()
                 with col_btn2:
                     if t.get("status") in ["pending", "in_progress"]:
@@ -1052,7 +1148,7 @@ with tab_kanban:
                                 "date": t["date"],
                                 "text": "狀態更新：標記完成"
                             })
-                            save_tasks(st.session_state.tasks, settings)
+                            save_tasks(st.session_state.tasks, settings, modified_tasks=[t])
                             st.rerun()
                     elif t.get("status") == "completed":
                         if st.button("📦 歸檔任務", key=f"archive_{t['id']}_{index_key}", help="歸檔後移出主看板，可在歷史檔案庫查閱", use_container_width=True):
@@ -1063,32 +1159,47 @@ with tab_kanban:
                                 "date": t["date"],
                                 "text": "狀態更新：已手動歸檔此任務"
                             })
-                            save_tasks(st.session_state.tasks, settings)
+                            save_tasks(st.session_state.tasks, settings, modified_tasks=[t])
                             st.rerun()
 
         with col_pending:
-            st.markdown("<h4 style='color:#F59E0B; border-bottom: 2px solid #F59E0B; padding-bottom: 6px; font-weight:700;'>⏳ 待處理</h4>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#F59E0B; border-bottom: 2px solid #F59E0B; padding-bottom: 6px; font-weight:700;'>&#9203; &#24453;&#34389;&#29702;</h4>", unsafe_allow_html=True)
             pending_list = [t for t in kanban_tasks if t.get("status") == "pending"]
-            for idx, t in enumerate(pending_list):
+            display_pending = pending_list[:st.session_state.limit_pending]
+            for idx, t in enumerate(display_pending):
                 render_kanban_card(t, f"pend_{idx}")
             if not pending_list:
-                st.info("無此類別待辦項目")
+                st.info("&#28961;&#27492;&#39006;&#21029;&#24453;&#36774;&#38917;&#30446;")
+            elif len(pending_list) > st.session_state.limit_pending:
+                if st.button("載入更多待辦項目...", key="btn_load_more_pending", use_container_width=True):
+                    st.session_state.limit_pending += 20
+                    st.rerun()
 
         with col_progress:
-            st.markdown("<h4 style='color:#06B6D4; border-bottom: 2px solid #06B6D4; padding-bottom: 6px; font-weight:700;'>⚡ 進行中</h4>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#06B6D4; border-bottom: 2px solid #06B6D4; padding-bottom: 6px; font-weight:700;'>&#9889; &#36914;&#34892;&#20013;</h4>", unsafe_allow_html=True)
             progress_list = [t for t in kanban_tasks if t.get("status") == "in_progress"]
-            for idx, t in enumerate(progress_list):
+            display_progress = progress_list[:st.session_state.limit_progress]
+            for idx, t in enumerate(display_progress):
                 render_kanban_card(t, f"prog_{idx}")
             if not progress_list:
-                st.info("無進行中項目")
+                st.info("&#28961;&#36914;&#34892;&#20013;&#38917;&#30446;")
+            elif len(progress_list) > st.session_state.limit_progress:
+                if st.button("載入更多進行中項目...", key="btn_load_more_progress", use_container_width=True):
+                    st.session_state.limit_progress += 20
+                    st.rerun()
 
         with col_completed:
-            st.markdown("<h4 style='color:#10B981; border-bottom: 2px solid #10B981; padding-bottom: 6px; font-weight:700;'>✅ 已完成</h4>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#10B981; border-bottom: 2px solid #10B981; padding-bottom: 6px; font-weight:700;'>&#9989; &#24050;&#23436;&#25104;</h4>", unsafe_allow_html=True)
             completed_list = [t for t in kanban_tasks if t.get("status") == "completed"]
-            for idx, t in enumerate(completed_list):
+            display_completed = completed_list[:st.session_state.limit_completed]
+            for idx, t in enumerate(display_completed):
                 render_kanban_card(t, f"comp_{idx}")
             if not completed_list:
-                st.info("無已完成項目")
+                st.info("&#28961;&#24050;&#23436;&#25104;&#38917;&#30446;")
+            elif len(completed_list) > st.session_state.limit_completed:
+                if st.button("載入更多已完成項目...", key="btn_load_more_completed", use_container_width=True):
+                    st.session_state.limit_completed += 20
+                    st.rerun()
 
     # CASE B: Render Full Overview Table Layout
     else:
@@ -1194,7 +1305,7 @@ with tab_kanban:
                                 "date": t["date"],
                                 "text": "狀態更新：已手動歸檔此任務"
                             })
-                            save_tasks(st.session_state.tasks, settings)
+                            save_tasks(st.session_state.tasks, settings, modified_tasks=[t])
                             st.rerun()
             
             # Divider between rows
@@ -1318,6 +1429,8 @@ with tab_parser:
                                 existing_task = t
                                 break
                     
+                    # Track imported tasks
+                    imported_task_ref = None
                     if existing_task:
                         if "meeting_history" not in existing_task:
                             existing_task["meeting_history"] = []
@@ -1356,6 +1469,7 @@ with tab_parser:
                             existing_task["status"] = item["status"]
                             existing_task["priority"] = item["priority"]
                             existing_task["is_cross_dept"] = item["is_cross_dept"]
+                        imported_task_ref = existing_task
                     else:
                         item_new = {
                             "id": item["id"],
@@ -1381,8 +1495,12 @@ with tab_parser:
                             }]
                         }
                         st.session_state.tasks.insert(0, item_new)
+                        imported_task_ref = item_new
+                    
+                    if imported_task_ref and imported_task_ref not in modified_tasks_list:
+                        modified_tasks_list.append(imported_task_ref)
                         
-                save_tasks(st.session_state.tasks, settings)
+                save_tasks(st.session_state.tasks, settings, modified_tasks=modified_tasks_list)
                 st.success(f"✅ 成功匯入/更新了 {len(import_list)} 項任務！")
                 st.rerun()
             else:
@@ -1437,8 +1555,20 @@ with tab_archive:
     arc_search = st.text_input("搜尋已歸檔任務名稱、負責人或決議說明...", key="arc_search_input")
     arc_dept = st.selectbox("篩選主責部門：", ["全部", "教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"], key="arc_dept_select")
     
-    # Query archived tasks
-    archived_tasks = [t for t in tasks if t.get("status") == "archived"]
+    # Query archived tasks (includes archived tasks, plus completed tasks older than 3 months)
+    import pandas as pd
+    archived_tasks = []
+    for t in tasks:
+        if t.get("status") == "archived":
+            archived_tasks.append(t)
+        elif t.get("status") == "completed":
+            try:
+                task_date = pd.to_datetime(t.get("date", ""), format="%Y.%m.%d")
+                three_months_ago = pd.Timestamp.now() - pd.DateOffset(months=3)
+                if task_date < three_months_ago:
+                    archived_tasks.append(t)
+            except:
+                pass
     
     # Filter archived tasks
     if arc_search:
@@ -1474,8 +1604,10 @@ with tab_archive:
 
             r_cols = st.columns([1.2, 1.5, 4.0, 1.2, 3.6, 0.5])
             
-            # Column 1: Archived Status Badge
-            r_cols[0].markdown('<span class="badge" style="background: rgba(148,163,184,0.15); color: #475569; border: 1px solid rgba(148,163,184,0.25);">📦 已歸檔</span>', unsafe_allow_html=True)
+            if t.get("status") == "completed":
+                r_cols[0].markdown('<span class="badge" style="background: rgba(16,185,129,0.15); color: #10B981; border: 1px solid rgba(16,185,129,0.15);">&#9989; &#27511;&#21490;&#23436;&#25104;</span>', unsafe_allow_html=True)
+            else:
+                r_cols[0].markdown('<span class="badge" style="background: rgba(148,163,184,0.15); color: #475569; border: 1px solid rgba(148,163,184,0.25);">&#128230; &#24050;&#27512;&#27284;</span>', unsafe_allow_html=True)
             
             # Column 2: Department Badge
             r_cols[1].markdown(f'<span class="badge" style="background: rgba(99,102,241,0.08); color: #6366F1; border: 1px solid rgba(99,102,241,0.15);">{esc_dept}</span>', unsafe_allow_html=True)
@@ -1523,7 +1655,7 @@ with tab_archive:
                         "date": t["date"],
                         "text": "狀態更新：自歷史檔案庫重啟任務"
                     })
-                    save_tasks(st.session_state.tasks, settings)
+                    save_tasks(st.session_state.tasks, settings, modified_tasks=[t])
                     st.success("✅ 任務已成功移回「進行中」看板！")
                     st.rerun()
             
