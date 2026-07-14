@@ -140,7 +140,7 @@ def parse_docx_to_tasks(file_bytes, filename):
         doc_content = "\n".join(full_text)
         
         # Call Gemini API
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
         prompt = (
             "你是一個博幼社會福利基金會的專業行政幕僚助理。請從以下會議記錄文本中，提取出所有需要追蹤的「任務/代辦事項」。\n"
