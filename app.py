@@ -109,161 +109,6 @@ def find_fuzzy_match(parsed_task, existing_tasks):
         return best_match, best_score, best_reason
     return None, 0.0, ""
 
-def score_columns(rows):
-    if not rows or len(rows) < 1:
-        return -1, -1, -1, -1
-        
-    num_cols = len(rows[0].cells)
-    if num_cols == 0:
-        return -1, -1, -1, -1
-        
-    title_scores = [0] * num_cols
-    dept_scores = [0] * num_cols
-    progress_scores = [0] * num_cols
-    owner_scores = [0] * num_cols
-    
-    # Analyze the first row (headers)
-    for col_idx in range(num_cols):
-        h_text = rows[0].cells[col_idx].text.strip()
-        
-        # 1. Header keyword weights (10 points each)
-        if any(x in h_text for x in ["內容", "代辦事項", "決議", "細部規格", "上次決議", "任務", "議題", "指標", "追蹤", "工作內容"]):
-            title_scores[col_idx] += 10
-        if any(x in h_text for x in ["主責組別", "主責單位", "單位", "組別"]):
-            # Add extra weight if it specifies dept, distinct from owner
-            dept_scores[col_idx] += 12
-        elif any(x in h_text for x in ["主責", "科室"]):
-            dept_scores[col_idx] += 8
-            owner_scores[col_idx] += 4
-            
-        if any(x in h_text for x in ["進度", "目前進度", "進度報告", "備註", "說明", "執行進度"]):
-            progress_scores[col_idx] += 10
-        if any(x in h_text for x in ["負責人", "主辦人", "負責", "對口", "人員", "組員", "主管", "主持", "人"]):
-            owner_scores[col_idx] += 10
-
-        # 2. Row data weights (from first 3 data rows if they exist)
-        sample_rows = rows[1:4]
-        for r in sample_rows:
-            if col_idx < len(r.cells):
-                val = r.cells[col_idx].text.strip()
-                if val:
-                    # Title features: average length > 15
-                    if len(val) > 15:
-                        title_scores[col_idx] += 3
-                    # Dept features: contains subgroup names
-                    if any(d in val for d in ["教材研發", "社工特教", "學區運營", "畢業生", "行政管理", "處長室"]):
-                        dept_scores[col_idx] += 5
-                    # Owner features: very short (usually 2-4 characters representing a person's name)
-                    if len(val) >= 2 and len(val) <= 4:
-                        if not any(d in val for d in ["教材", "社工", "特教", "學區", "運營", "畢業", "行政", "處長"]):
-                            owner_scores[col_idx] += 3
-                    # Progress features: contains status indicator words or digits/percentages
-                    if "%" in val or any(x in val for x in ["完成", "進行", "未開", "規劃", "延宕", "落後"]) or any(c.isdigit() for c in val):
-                        progress_scores[col_idx] += 2
-
-    # Find indices
-    best_title = title_scores.index(max(title_scores)) if max(title_scores) > 0 else -1
-    best_dept = dept_scores.index(max(dept_scores)) if max(dept_scores) > 0 else -1
-    best_progress = progress_scores.index(max(progress_scores)) if max(progress_scores) > 0 else -1
-    
-    # Overlap resolution: if dept and owner are the same, check who has higher score or assign second best
-    best_owner = -1
-    max_owner_score = -1
-    for col_idx in range(num_cols):
-        score = owner_scores[col_idx]
-        if col_idx == best_dept:
-            score -= 5
-        if col_idx == best_title:
-            score -= 10
-        if score > max_owner_score:
-            max_owner_score = score
-            best_owner = col_idx
-            
-    if max_owner_score <= 0:
-        best_owner = -1
-        
-    return best_title, best_dept, best_progress, best_owner
-
-def parse_docx_to_tasks_local(file_bytes, filename, meeting_date):
-    doc = Document(io.BytesIO(file_bytes))
-    parsed = []
-    
-    # 1. Parse tables
-    for table_idx, table in enumerate(doc.tables):
-        rows = table.rows
-        if len(rows) < 2:
-            continue
-            
-        title_idx, dept_idx, progress_idx, owner_idx = score_columns(rows)
-        
-        # Fallback if title is missing
-        if title_idx == -1:
-            title_idx = 0
-            
-        for row_idx in range(1, len(rows)):
-            try:
-                cells = [c.text.strip() for c in rows[row_idx].cells]
-                if len(cells) <= title_idx:
-                    continue
-                title = cells[title_idx]
-                
-                if title and len(title) > 5 and "說明：" not in title:
-                    dept_text = cells[dept_idx] if (dept_idx != -1 and dept_idx < len(cells)) else ""
-                    detected_dept = detect_department(dept_text + " " + title)
-                    progress = cells[progress_idx] if (progress_idx != -1 and progress_idx < len(cells)) else ""
-                    owner = cells[owner_idx] if (owner_idx != -1 and owner_idx < len(cells)) else (dept_text or "待指派")
-                    
-                    is_cross = False
-                    for word in ["跨部門", "跨組", "跨單位", "協辦"]:
-                        if word in title or word in (progress or ""):
-                            is_cross = True
-                    
-                    parsed.append({
-                        "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-{table_idx}-{row_idx}",
-                        "title": title[:80] + "..." if len(title) > 80 else title,
-                        "dept": detected_dept,
-                        "owner": owner,
-                        "meeting": filename.replace(".docx", ""),
-                        "date": meeting_date,
-                        "status": "completed" if ("完成" in progress or "100%" in progress) else "in_progress",
-                        "priority": "high" if ("高" in title or "立刻" in title) else "medium",
-                        "content": title,
-                        "progress": progress or "自會議記錄匯入",
-                        "is_cross_dept": is_cross
-                    })
-            except Exception as e:
-                import logging
-                logging.warning(f"Failed to parse table row {row_idx} in table {table_idx}: {str(e)}")
-                continue
-                
-    # 2. If no tables parsed, parse paragraphs line-by-line
-    if not parsed:
-        for p_idx, para in enumerate(doc.paragraphs):
-            try:
-                text = para.text.strip()
-                if not text or len(text) < 10:
-                    continue
-                if text[0].isdigit() or text.startswith("-") or text.startswith("●"):
-                    detected_dept = detect_department(text)
-                    parsed.append({
-                        "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-p-{p_idx}",
-                        "title": text[:60] + "..." if len(text) > 60 else text,
-                        "dept": detected_dept,
-                        "owner": "待指派",
-                        "meeting": filename.replace(".docx", ""),
-                        "date": meeting_date,
-                        "status": "in_progress",
-                        "priority": "medium",
-                        "content": text,
-                        "progress": "自會議記錄文字段落提取",
-                        "is_cross_dept": False
-                    })
-            except Exception as e:
-                import logging
-                logging.warning(f"Failed to parse paragraph {p_idx}: {str(e)}")
-                continue
-    return parsed
-
 def parse_docx_to_tasks(file_bytes, filename):
     doc = Document(io.BytesIO(file_bytes))
     meeting_date = extract_date_from_filename(filename)
@@ -382,12 +227,10 @@ def parse_docx_to_tasks(file_bytes, filename):
                 st.toast("🔮 已使用 Gemini API 進行 AI 智慧語意解析！", icon="🔮")
                 return parsed
         except Exception as e:
-            st.toast("⚠️ Gemini API 呼叫失敗，已自動降級使用本地解析模型。", icon="⚠️")
+            pass
             
-    # Local fallback parsing with Heuristic Scoring Model
-    parsed_local = parse_docx_to_tasks_local(file_bytes, filename, meeting_date)
-    st.toast("💡 已使用本機「特徵推斷計分模型」進行解析。", icon="💡")
-    return parsed_local
+    st.toast("❌ 無法使用 Gemini 進行智慧解析，請手動新增任務。", icon="❌")
+    return []
 
 def html_escape(text):
     """Prevent XSS and HTML layout breakage in markdown cards."""
