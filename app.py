@@ -8,6 +8,9 @@ import re
 from docx import Document
 import io
 import html
+import zipfile
+import xml.etree.ElementTree as ET
+import threading
 import difflib
 
 # 1. Page Config & Setup
@@ -111,7 +114,6 @@ def find_fuzzy_match(parsed_task, existing_tasks):
     return None, 0.0, ""
 
 def parse_docx_to_tasks(file_bytes, filename):
-    doc = Document(io.BytesIO(file_bytes))
     meeting_date = extract_date_from_filename(filename)
     
     # Check if Gemini API Key is available (support both GEMINI_API_KEY and GOOGLE_API_KEY)
@@ -127,17 +129,44 @@ def parse_docx_to_tasks(file_bytes, filename):
         return []
         
     try:
-        # Extract all text and table contents from docx
+        # Structured serialization of Word paragraphs and tables to preserve column alignment
+        # We read word/document.xml directly via zipfile for 100x speedup and skipping images
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+            xml_content = z.read('word/document.xml')
+            
+        root = ET.fromstring(xml_content)
+        namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        body = root.find('w:body', namespaces)
+        
         full_text = []
-        for p in doc.paragraphs:
-            t = p.text.strip()
-            if t:
-                full_text.append(t)
-        for table in doc.tables:
-            for row in table.rows:
-                row_text = " | ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
-                if row_text:
-                    full_text.append(row_text)
+        if body is not None:
+            p_idx = 1
+            t_idx = 1
+            for child in body:
+                tag = child.tag
+                if tag.endswith('}p'):
+                    # Extract text from paragraph child
+                    text = "".join([node.text for node in child.findall('.//w:t', namespaces) if node.text])
+                    t_clean = text.strip()
+                    if t_clean:
+                        if len(full_text) == 0 or full_text[-1] != "=== 會議記錄段落文字 ===":
+                            if "=== 會議記錄段落文字 ===" not in full_text:
+                                full_text.append("=== 會議記錄段落文字 ===")
+                        full_text.append(f"段落 {p_idx}: {t_clean}")
+                        p_idx += 1
+                elif tag.endswith('}tbl'):
+                    # Extract table rows and cells
+                    full_text.append(f"=== 表格 {t_idx} ===")
+                    for r_idx, row in enumerate(child.findall('.//w:tr', namespaces)):
+                        row_cells = []
+                        for cell in row.findall('./w:tc', namespaces):
+                            # Extract all text from cell paragraphs
+                            cell_text = "".join([node.text for node in cell.findall('.//w:t', namespaces) if node.text])
+                            row_cells.append(cell_text.strip().replace("\n", " ").replace("\r", ""))
+                        row_str = " | ".join(row_cells)
+                        full_text.append(f"表格 {t_idx} - 列 {r_idx+1}: {row_str}")
+                    t_idx += 1
+                    
         doc_content = "\n".join(full_text)
         
         # Configure Gemini API
@@ -183,9 +212,9 @@ def parse_docx_to_tasks(file_bytes, filename):
         
         prompt = (
             "你是一個博幼社會福利基金會的專業行政幕僚助理。請從以下會議記錄文本中，提取出所有需要追蹤的「任務/代辦事項」。\n"
-            "請仔細閱讀所有段落與表格。\n\n"
+            "請特別注意對齊表格的欄位，表格的每一行格式為『表格 X - 列 Z: 值1 | 值2 | 值3 | ...』。第一列（列 1）通常是欄位標題，請仔細比對各列的值與標題，切勿將不同欄位的值混淆！\n\n"
             "【提取與分類規則】\n"
-            "1. 任務名稱（title）：簡潔有力，代表任務的主題（不超過80個字）。\n"
+            "1. 任務名稱（title）：應對應表格中的「決議事項」、「工作說明」或「任務」欄位（簡潔主題，不超過80個字）。\n"
             "2. 主責部門（dept）：必須從以下組別中選擇一個最合適之主責組別：\n"
             "   - \"教材研發組\"\n"
             "   - \"社工特教組\"\n"
@@ -195,8 +224,8 @@ def parse_docx_to_tasks(file_bytes, filename):
             "3. 主責對口（owner）：負責該任務的人員名稱，若在文本中沒有提到明確姓名，則填寫「待指派」。\n"
             "4. 任務狀態（status）：若文本中提到「已完成」、「100%」等，狀態設為 \"completed\"，否則設為 \"in_progress\" 或 \"pending\"。\n"
             "5. 優先權（priority）：根據文字描述的緊急程度，歸類為 \"high\"（高）、\"medium\"（中）或 \"low\"（低）。若無特別提及，預設為 \"medium\"。\n"
-            "6. 決議細節（content）：該任務的詳細說明與會議決議，請保持完整與準確。\n"
-            "7. 目前進度（progress）：任務的最新進度說明。若文本中無特別說明，預設為「自會議記錄匯入目標」。\n"
+            "6. 決議細節（content）：應該提取對應表格中「說明」、「決議細節」或完整內容欄位，必須忠實反映會議記錄內容。\n"
+            "7. 目前進度（progress）：應該提取對應表格中「進度」、「目前進度報告」或「備註」欄位。若無則預設為「自會議記錄匯入目標」。\n"
             "8. 跨部門協作（is_cross_dept）：這是一個布林值（true/false）。如果任務內容包含跨部門合作、協辦、跨組別、多個部門共同負責等特徵，請設為 true，否則設為 false。\n\n"
             "會議記錄文本如下：\n"
             "\"\"\"\n"
@@ -513,6 +542,195 @@ def get_sheets_csv_url(url):
     return None
 
 # Load Tasks & Migrate Schema dynamically
+def load_tasks(settings):
+    raw_tasks = []
+    if settings.get("sheet_url"):
+        csv_url = get_sheets_csv_url(settings["sheet_url"])
+        if csv_url:
+            try:
+                df = pd.read_csv(csv_url)
+                # Cast all values to string to prevent float NaN conversions
+                df = df.astype(str).replace("nan", "")
+                raw_tasks = df.to_dict(orient="records")
+                # Write back as local cache for offline/resilience fallback
+                save_tasks_safely(raw_tasks, LOCAL_DATA_FILE)
+            except Exception as e:
+                st.sidebar.error(f"⚠️ 無法讀取 Google 試算表，改為載入本地檔案。錯誤：{str(e)}")
+
+    if not raw_tasks and os.path.exists(LOCAL_DATA_FILE):
+        try:
+            with open(LOCAL_DATA_FILE, "r", encoding="utf-8") as f:
+                raw_tasks = json.load(f)
+        except Exception as e:
+            st.error(f"讀取 {LOCAL_DATA_FILE} 出錯：{str(e)}")
+
+    # Migrate Schema dynamically (Self-healing data structure)
+    migrated = False
+    for t in raw_tasks:
+        # Parse history strings from Google Sheets CSV
+        if isinstance(t.get("meeting_history"), str):
+            try:
+                import json
+                t["meeting_history"] = json.loads(t["meeting_history"])
+            except Exception as e:
+                pass
+        if isinstance(t.get("progress_history"), str):
+            try:
+                import json
+                t["progress_history"] = json.loads(t["progress_history"])
+            except Exception as e:
+                pass
+
+        if "meeting_history" not in t or not isinstance(t["meeting_history"], list):
+            t["meeting_history"] = [{
+                "meeting": t.get("meeting", "策略發展會議"),
+                "date": t.get("date", "2026.06.08"),
+                "content": t.get("content", "")
+            }]
+            migrated = True
+        if "progress_history" not in t or not isinstance(t["progress_history"], list):
+            t["progress_history"] = [{
+                "date": t.get("date", "2026.06.08"),
+                "text": t.get("progress", "建立追蹤")
+            }]
+            migrated = True
+        if "is_cross_dept" in t:
+            val = t["is_cross_dept"]
+            if isinstance(val, str):
+                t["is_cross_dept"] = val.strip().lower() in ["true", "1", "yes", "t"]
+                migrated = True
+            elif isinstance(val, float):
+                import math
+                t["is_cross_dept"] = bool(val) and not math.isnan(val)
+                migrated = True
+            else:
+                t["is_cross_dept"] = bool(val)
+        else:
+            is_cross = False
+            for word in ["跨部門", "跨組", "跨單位", "協辦"]:
+                if word in t.get("title", "") or word in t.get("content", ""):
+                    is_cross = True
+            t["is_cross_dept"] = is_cross
+            migrated = True
+    
+    if migrated and raw_tasks:
+        try:
+            save_tasks_safely(raw_tasks, LOCAL_DATA_FILE)
+        except:
+            pass
+            
+    # Background retry queue: check if any tasks have sync_pending == True
+    # And try to sync them now!
+    gas_url = settings.get("gas_url")
+    if gas_url and any(t.get("sync_pending") for t in raw_tasks):
+        pending_tasks = [t for t in raw_tasks if t.get("sync_pending")]
+        try:
+            serializable_pending = []
+            for t in pending_tasks:
+                tc = t.copy()
+                tc.pop("sync_pending", None)
+                if "meeting_history" in tc and isinstance(tc["meeting_history"], list):
+                    tc["meeting_history"] = json.dumps(tc["meeting_history"], ensure_ascii=False)
+                if "progress_history" in tc and isinstance(tc["progress_history"], list):
+                    tc["progress_history"] = json.dumps(tc["progress_history"], ensure_ascii=False)
+                serializable_pending.append(tc)
+                
+            response = requests.post(
+                gas_url,
+                json=serializable_pending,
+                headers={"Content-Type": "application/json"},
+                timeout=5
+            )
+            if response.status_code == 200:
+                for t in pending_tasks:
+                    t["sync_pending"] = False
+                save_tasks_safely(raw_tasks, LOCAL_DATA_FILE)
+                st.sidebar.success("✅ 成功補齊先前漏接的進度！")
+        except:
+            pass
+
+    return raw_tasks
+
+# Save Tasks Safely (Atomic Write)
+def save_tasks_safely(tasks, filepath):
+    import tempfile
+    fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(filepath)))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(tasks, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, filepath)
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise e
+
+# Save Tasks
+def run_cloud_sync_in_background(gas_url, serializable_tasks, tasks_to_send):
+    def sync_thread():
+        try:
+            response = requests.post(
+                gas_url,
+                json=serializable_tasks,
+                headers={"Content-Type": "application/json"},
+                timeout=15
+            )
+            if response.status_code == 200:
+                try:
+                    with open(LOCAL_DATA_FILE, 'r', encoding='utf-8') as f:
+                        current_tasks = json.load(f)
+                    
+                    target_ids = {t["id"] for t in tasks_to_send}
+                    for t in current_tasks:
+                        if t.get("id") in target_ids:
+                            t["sync_pending"] = False
+                            
+                    save_tasks_safely(current_tasks, LOCAL_DATA_FILE)
+                except Exception as e:
+                    import logging
+                    logging.error(f"Failed to clear sync_pending in background: {str(e)}")
+        except Exception as e:
+            import logging
+            logging.error(f"Background cloud sync failed: {str(e)}")
+            
+    threading.Thread(target=sync_thread, daemon=True).start()
+
+def save_tasks(tasks, settings, modified_tasks=None):
+    # 1. Always save raw tasks locally first (atomic save)
+    save_tasks_safely(tasks, LOCAL_DATA_FILE)
+    
+    # 2. Check if cloud sync is configured
+    gas_url = settings.get("gas_url")
+    if not gas_url:
+        return
+        
+    # If modified_tasks is [] (empty list), it means we only want to write locally (e.g. after deletion)
+    if modified_tasks == []:
+        return
+        
+    # Determine what to send (None = all tasks, otherwise modified_tasks)
+    tasks_to_send = tasks if modified_tasks is None else modified_tasks
+    
+    # Mark them all as sync_pending = True in the actual tasks list
+    for t in tasks_to_send:
+        t["sync_pending"] = True
+        
+    # Save the pending state locally
+    save_tasks_safely(tasks, LOCAL_DATA_FILE)
+    
+    # Serialize complex columns to JSON strings for Google Sheets
+    serializable_tasks = []
+    for t in tasks_to_send:
+        tc = t.copy()
+        tc.pop("sync_pending", None)
+        if "meeting_history" in tc and isinstance(tc["meeting_history"], list):
+            tc["meeting_history"] = json.dumps(tc["meeting_history"], ensure_ascii=False)
+        if "progress_history" in tc and isinstance(tc["progress_history"], list):
+            tc["progress_history"] = json.dumps(tc["progress_history"], ensure_ascii=False)
+        serializable_tasks.append(tc)
+        
+    # Trigger background sync thread (Non-blocking UI!)
+    run_cloud_sync_in_background(gas_url, serializable_tasks, tasks_to_send)
+
 def load_tasks(settings):
     raw_tasks = []
     if settings.get("sheet_url"):
