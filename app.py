@@ -3,6 +3,7 @@ import pandas as pd
 import json
 import os
 import requests
+import google.generativeai as genai
 import re
 from docx import Document
 import io
@@ -139,41 +140,13 @@ def parse_docx_to_tasks(file_bytes, filename):
                     full_text.append(row_text)
         doc_content = "\n".join(full_text)
         
-        # Call Gemini API
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        prompt = (
-            "你是一個博幼社會福利基金會的專業行政幕僚助理。請從以下會議記錄文本中，提取出所有需要追蹤的「任務/代辦事項」。\n"
-            "請仔細閱讀所有段落與表格。\n\n"
-            "【提取與分類規則】\n"
-            "1. 任務名稱（title）：簡潔有力，代表任務的主題（不超過80個字）。\n"
-            "2. 主責部門（dept）：必須從以下組別中選擇一個最合適的主責組別：\n"
-            "   - \"教材研發組\"\n"
-            "   - \"社工特教組\"\n"
-            "   - \"學區運營組\"\n"
-            "   - \"畢業生組\"\n"
-            "   - \"處長室/行政管理\"\n"
-            "3. 主責對口（owner）：負責該任務的人員名稱，若在文本中沒有提到明確姓名，則填寫「待指派」。\n"
-            "4. 任務狀態（status）：若文本中提到「已完成」、「100%」等，狀態設為 \"completed\"，否則設為 \"in_progress\" 或 \"pending\"。\n"
-            "5. 優先權（priority）：根據文字描述的緊急程度，歸類為 \"high\"（高）、\"medium\"（中）或 \"low\"（低）。若無特別提及，預設為 \"medium\"。\n"
-            "6. 決議細節（content）：該任務的詳細說明與會議決議，請保持完整與準確。\n"
-            "7. 目前進度（progress）：任務的最新進度說明。若文本中無特別說明，預設為「自會議記錄匯入目標」。\n"
-            "8. 跨部門協作（is_cross_dept）：這是一個布林值（true/false）。如果任務內容包含跨部門合作、協辦、跨組別、多個部門共同負責等特徵，請設為 true，否則設為 false。\n\n"
-            "會議記錄文本如下：\n"
-            "\"\"\"\n"
-            f"{doc_content}\n"
-            "\"\"\""
-        )
-        
-        payload = {
-            "contents": [{
-                "parts": [{
-                    "text": prompt
-                }]
-            }],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": {
+        # Configure Gemini API
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name="gemini-3.5-flash",
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": {
                     "type": "OBJECT",
                     "properties": {
                         "tasks": {
@@ -206,34 +179,55 @@ def parse_docx_to_tasks(file_bytes, filename):
                     "required": ["tasks"]
                 }
             }
-        }
+        )
         
-        response = requests.post(url, json=payload, headers=headers, timeout=25)
-        if response.status_code == 200:
-            data = response.json()
-            text_response = data["candidates"][0]["content"]["parts"][0]["text"]
-            raw_tasks = json.loads(text_response).get("tasks", [])
-            
-            # Fill in Python-specific fields
-            parsed = []
-            for i, t in enumerate(raw_tasks):
-                parsed.append({
-                    "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-ai-{i}",
-                    "title": t["title"],
-                    "dept": t["dept"],
-                    "owner": t["owner"],
-                    "meeting": filename.replace(".docx", ""),
-                    "date": meeting_date,
-                    "status": t["status"],
-                    "priority": t["priority"],
-                    "content": t["content"],
-                    "progress": t["progress"],
-                    "is_cross_dept": t["is_cross_dept"]
-                })
-            st.toast("🔮 已使用 Gemini API 進行 AI 智慧語意解析！", icon="🔮")
-            return parsed
-        else:
-            raise Exception(f"API 回傳狀態碼 {response.status_code}: {response.text}")
+        prompt = (
+            "你是一個博幼社會福利基金會的專業行政幕僚助理。請從以下會議記錄文本中，提取出所有需要追蹤的「任務/代辦事項」。\n"
+            "請仔細閱讀所有段落與表格。\n\n"
+            "【提取與分類規則】\n"
+            "1. 任務名稱（title）：簡潔有力，代表任務的主題（不超過80個字）。\n"
+            "2. 主責部門（dept）：必須從以下組別中選擇一個最合適之主責組別：\n"
+            "   - \"教材研發組\"\n"
+            "   - \"社工特教組\"\n"
+            "   - \"學區運營組\"\n"
+            "   - \"畢業生組\"\n"
+            "   - \"處長室/行政管理\"\n"
+            "3. 主責對口（owner）：負責該任務的人員名稱，若在文本中沒有提到明確姓名，則填寫「待指派」。\n"
+            "4. 任務狀態（status）：若文本中提到「已完成」、「100%」等，狀態設為 \"completed\"，否則設為 \"in_progress\" 或 \"pending\"。\n"
+            "5. 優先權（priority）：根據文字描述的緊急程度，歸類為 \"high\"（高）、\"medium\"（中）或 \"low\"（低）。若無特別提及，預設為 \"medium\"。\n"
+            "6. 決議細節（content）：該任務的詳細說明與會議決議，請保持完整與準確。\n"
+            "7. 目前進度（progress）：任務的最新進度說明。若文本中無特別說明，預設為「自會議記錄匯入目標」。\n"
+            "8. 跨部門協作（is_cross_dept）：這是一個布林值（true/false）。如果任務內容包含跨部門合作、協辦、跨組別、多個部門共同負責等特徵，請設為 true，否則設為 false。\n\n"
+            "會議記錄文本如下：\n"
+            "\"\"\"\n"
+        )
+        full_prompt = prompt + doc_content + "\n\"\"\""
+        
+        response = model.generate_content(
+            full_prompt,
+            request_options={"timeout": 120}
+        )
+        
+        raw_tasks = json.loads(response.text).get("tasks", [])
+        
+        # Fill in Python-specific fields
+        parsed = []
+        for i, t in enumerate(raw_tasks):
+            parsed.append({
+                "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-ai-{i}",
+                "title": t["title"],
+                "dept": t["dept"],
+                "owner": t["owner"],
+                "meeting": filename.replace(".docx", ""),
+                "date": meeting_date,
+                "status": t["status"],
+                "priority": t["priority"],
+                "content": t["content"],
+                "progress": t["progress"],
+                "is_cross_dept": t["is_cross_dept"]
+            })
+        st.toast("🔮 已使用 Gemini API 進行 AI 智慧語意解析！", icon="🔮")
+        return parsed
     except Exception as e:
         st.toast(f"⚠️ Gemini API 錯誤: {str(e)}", icon="⚠️")
         import logging
