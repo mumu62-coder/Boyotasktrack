@@ -157,7 +157,7 @@ def parse_docx_to_tasks(file_bytes, filename):
                                     "title": { "type": "STRING" },
                                     "dept": { 
                                         "type": "STRING", 
-                                        "enum": ["教材研發組", "社工特教組", "學區運營組", "畢業生組", "處長室/行政管理"]
+                                        "enum": ["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"]
                                     },
                                     "owner": { "type": "STRING" },
                                     "status": { 
@@ -189,7 +189,7 @@ def parse_docx_to_tasks(file_bytes, filename):
             "2. 主責部門（dept）：必須從以下組別中選擇一個最合適之主責組別：\n"
             "   - \"教材研發組\"\n"
             "   - \"社工特教組\"\n"
-            "   - \"學區運營組\"\n"
+            "   - \"學區營運組\"\n"
             "   - \"畢業生組\"\n"
             "   - \"處長室/行政管理\"\n"
             "3. 主責對口（owner）：負責該任務的人員名稱，若在文本中沒有提到明確姓名，則填寫「待指派」。\n"
@@ -300,6 +300,12 @@ def clean_html(html_str):
     if not html_str:
         return ""
     return "\n".join([line.strip() for line in html_str.split("\n")])
+
+def safe_index(lst, val, default=0):
+    try:
+        return lst.index(val)
+    except:
+        return default
 
 # Inject Custom CSS for premium glassmorphism layout
 st.markdown(clean_html(f"""
@@ -794,10 +800,10 @@ if hasattr(st, "dialog"):
         st.markdown("---")
         
         ut_title = st.text_input("任務名稱", value=task.get("title"))
-        ut_dept = st.selectbox("主責部門", ["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"], index=["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"].index(task.get("dept")))
-        ut_status = st.selectbox("進度狀態", ["pending", "in_progress", "completed", "archived"], index=["pending", "in_progress", "completed", "archived"].index(task.get("status")), format_func=lambda x: "⏳ 待處理" if x == "pending" else ("⚡ 進行中" if x == "in_progress" else ("✅ 已完成" if x == "completed" else "📦 已歸檔")))
+        ut_dept = st.selectbox("主責部門", ["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"], index=safe_index(["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"], task.get("dept")))
+        ut_status = st.selectbox("進度狀態", ["pending", "in_progress", "completed", "archived"], index=safe_index(["pending", "in_progress", "completed", "archived"], task.get("status")), format_func=lambda x: "⏳ 待處理" if x == "pending" else ("⚡ 進行中" if x == "in_progress" else ("✅ 已完成" if x == "completed" else "📦 已歸檔")))
         ut_owner = st.text_input("主責負責人", value=task.get("owner"))
-        ut_priority = st.selectbox("優先度", ["high", "medium", "low"], index=["high", "medium", "low"].index(task.get("priority")))
+        ut_priority = st.selectbox("優先度", ["high", "medium", "low"], index=safe_index(["high", "medium", "low"], task.get("priority")))
         ut_date = st.text_input("最近更新日期", value=pd.Timestamp.now().strftime('%Y.%m.%d'))
         ut_content = st.text_area("詳細決議 / 任務說明", value=task.get("content"))
         ut_cross = st.checkbox("🤝 此任務需要跨部門/跨組別協作配合", value=bool(task.get("is_cross_dept", False)))
@@ -918,7 +924,7 @@ else:
         st.sidebar.markdown(f"### ✏️ 編輯任務: {task.get('title')}")
         ut_title = st.sidebar.text_input("任務名稱", value=task.get("title"))
         ut_owner = st.sidebar.text_input("主責對口", value=task.get("owner"))
-        ut_status = st.sidebar.selectbox("進度狀態", ["pending", "in_progress", "completed", "archived"], index=["pending", "in_progress", "completed", "archived"].index(task.get("status")))
+        ut_status = st.sidebar.selectbox("進度狀態", ["pending", "in_progress", "completed", "archived"], index=safe_index(["pending", "in_progress", "completed", "archived"], task.get("status")))
         ut_cross = st.sidebar.checkbox("跨部門協作任務", value=bool(task.get("is_cross_dept", False)))
         current_user = get_current_user_sig()
         st.sidebar.info(f"👤 目前操作帳號：{current_user}")
@@ -1397,11 +1403,11 @@ with tab_parser:
                     t_title = st.text_input("任務名稱", value=task["title"], key=f"imp_title_{idx}")
                     col_det_sub1, col_det_sub2 = st.columns(2)
                     with col_det_sub1:
-                        t_dept = st.selectbox("主責部門", ["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"], index=["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"].index(task["dept"]), key=f"imp_dept_{idx}")
+                        t_dept = st.selectbox("主責部門", ["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"], index=safe_index(["教材研發組", "社工特教組", "學區營運組", "畢業生組", "處長室/行政管理"], task.get("dept")), key=f"imp_dept_{idx}")
                         t_owner = st.text_input("主責負責人", value=task["owner"], key=f"imp_owner_{idx}")
                     with col_det_sub2:
-                        t_status = st.selectbox("狀態", ["pending", "in_progress", "completed"], index=["pending", "in_progress", "completed"].index(task["status"]), key=f"imp_status_{idx}")
-                        t_priority = st.selectbox("優先度", ["high", "medium", "low"], index=["high", "medium", "low"].index(task["priority"]), key=f"imp_pri_{idx}")
+                        t_status = st.selectbox("狀態", ["pending", "in_progress", "completed"], index=safe_index(["pending", "in_progress", "completed"], task.get("status")), key=f"imp_status_{idx}")
+                        t_priority = st.selectbox("優先度", ["high", "medium", "low"], index=safe_index(["high", "medium", "low"], task.get("priority")), key=f"imp_pri_{idx}")
                         t_date = st.text_input("會議日期 (格式: YYYY.MM.DD)", value=task["date"], key=f"imp_date_{idx}")
                     
                     t_cross = st.checkbox("🤝 此任務需要跨部門/跨組別協作配合", value=bool(task.get("is_cross_dept", False)), key=f"imp_cross_{idx}")
