@@ -1450,6 +1450,7 @@ with tab_parser:
         
         if st.button("📥 匯入已勾選之任務卡片", type="primary"):
             if import_list:
+                modified_tasks_list = []
                 for item in import_list:
                     existing_task = None
                     
