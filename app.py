@@ -109,72 +109,133 @@ def find_fuzzy_match(parsed_task, existing_tasks):
         return best_match, best_score, best_reason
     return None, 0.0, ""
 
-def parse_docx_to_tasks(file_bytes, filename):
+def score_columns(rows):
+    if not rows or len(rows) < 1:
+        return -1, -1, -1, -1
+        
+    num_cols = len(rows[0].cells)
+    if num_cols == 0:
+        return -1, -1, -1, -1
+        
+    title_scores = [0] * num_cols
+    dept_scores = [0] * num_cols
+    progress_scores = [0] * num_cols
+    owner_scores = [0] * num_cols
+    
+    # Analyze the first row (headers)
+    for col_idx in range(num_cols):
+        h_text = rows[0].cells[col_idx].text.strip()
+        
+        # 1. Header keyword weights (10 points each)
+        if any(x in h_text for x in ["內容", "代辦事項", "決議", "細部規格", "上次決議", "任務", "議題", "指標", "追蹤", "工作內容"]):
+            title_scores[col_idx] += 10
+        if any(x in h_text for x in ["主責組別", "主責單位", "單位", "組別"]):
+            # Add extra weight if it specifies dept, distinct from owner
+            dept_scores[col_idx] += 12
+        elif any(x in h_text for x in ["主責", "科室"]):
+            dept_scores[col_idx] += 8
+            owner_scores[col_idx] += 4
+            
+        if any(x in h_text for x in ["進度", "目前進度", "進度報告", "備註", "說明", "執行進度"]):
+            progress_scores[col_idx] += 10
+        if any(x in h_text for x in ["負責人", "主辦人", "負責", "對口", "人員", "組員", "主管", "主持", "人"]):
+            owner_scores[col_idx] += 10
+
+        # 2. Row data weights (from first 3 data rows if they exist)
+        sample_rows = rows[1:4]
+        for r in sample_rows:
+            if col_idx < len(r.cells):
+                val = r.cells[col_idx].text.strip()
+                if val:
+                    # Title features: average length > 15
+                    if len(val) > 15:
+                        title_scores[col_idx] += 3
+                    # Dept features: contains subgroup names
+                    if any(d in val for d in ["教材研發", "社工特教", "學區運營", "畢業生", "行政管理", "處長室"]):
+                        dept_scores[col_idx] += 5
+                    # Owner features: very short (usually 2-4 characters representing a person's name)
+                    if len(val) >= 2 and len(val) <= 4:
+                        if not any(d in val for d in ["教材", "社工", "特教", "學區", "運營", "畢業", "行政", "處長"]):
+                            owner_scores[col_idx] += 3
+                    # Progress features: contains status indicator words or digits/percentages
+                    if "%" in val or any(x in val for x in ["完成", "進行", "未開", "規劃", "延宕", "落後"]) or any(c.isdigit() for c in val):
+                        progress_scores[col_idx] += 2
+
+    # Find indices
+    best_title = title_scores.index(max(title_scores)) if max(title_scores) > 0 else -1
+    best_dept = dept_scores.index(max(dept_scores)) if max(dept_scores) > 0 else -1
+    best_progress = progress_scores.index(max(progress_scores)) if max(progress_scores) > 0 else -1
+    
+    # Overlap resolution: if dept and owner are the same, check who has higher score or assign second best
+    best_owner = -1
+    max_owner_score = -1
+    for col_idx in range(num_cols):
+        score = owner_scores[col_idx]
+        if col_idx == best_dept:
+            score -= 5
+        if col_idx == best_title:
+            score -= 10
+        if score > max_owner_score:
+            max_owner_score = score
+            best_owner = col_idx
+            
+    if max_owner_score <= 0:
+        best_owner = -1
+        
+    return best_title, best_dept, best_progress, best_owner
+
+def parse_docx_to_tasks_local(file_bytes, filename, meeting_date):
     doc = Document(io.BytesIO(file_bytes))
     parsed = []
-    
-    # Auto-extract meeting date from the filename
-    meeting_date = extract_date_from_filename(filename)
     
     # 1. Parse tables
     for table_idx, table in enumerate(doc.tables):
         rows = table.rows
         if len(rows) < 2:
             continue
+            
+        title_idx, dept_idx, progress_idx, owner_idx = score_columns(rows)
         
-        headers = [cell.text.strip() for cell in rows[0].cells]
-        title_idx = -1
-        dept_idx = -1
-        progress_idx = -1
-        owner_idx = -1
-        
-        for idx, h in enumerate(headers):
-            if any(x in h for x in ["內容", "代辦事項", "決議", "細部規格", "上次決議", "任務"]):
-                title_idx = idx
-            if any(x in h for x in ["主責", "單位", "組別"]):
-                dept_idx = idx
-            if any(x in h for x in ["進度", "目前進度", "進度報告", "備註"]):
-                progress_idx = idx
-            if any(x in h for x in ["主持", "人", "組員", "主責", "對口"]):
-                owner_idx = idx
-        
-        if title_idx != -1:
-            for row_idx in range(1, len(rows)):
-                try:
-                    cells = [c.text.strip() for c in rows[row_idx].cells]
-                    if len(cells) <= title_idx:
-                        continue
-                    title = cells[title_idx]
-                    
-                    if title and len(title) > 5 and "說明：" not in title:
-                        dept_text = cells[dept_idx] if (dept_idx != -1 and dept_idx < len(cells)) else ""
-                        detected_dept = detect_department(dept_text + " " + title)
-                        progress = cells[progress_idx] if (progress_idx != -1 and progress_idx < len(cells)) else ""
-                        owner = cells[owner_idx] if (owner_idx != -1 and owner_idx < len(cells)) else (dept_text or "待指派")
-                        
-                        is_cross = False
-                        for word in ["跨部門", "跨組", "跨單位", "協辦"]:
-                            if word in title or word in (progress or ""):
-                                is_cross = True
-                        
-                        parsed.append({
-                            "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-{table_idx}-{row_idx}",
-                            "title": title[:80] + "..." if len(title) > 80 else title,
-                            "dept": detected_dept,
-                            "owner": owner,
-                            "meeting": filename.replace(".docx", ""),
-                            "date": meeting_date,
-                            "status": "completed" if ("完成" in progress or "100%" in progress) else "in_progress",
-                            "priority": "high" if ("高" in title or "立刻" in title) else "medium",
-                            "content": title,
-                            "progress": progress or "自會議記錄匯入",
-                            "is_cross_dept": is_cross
-                        })
-                except Exception as e:
-                    import logging
-                    logging.warning(f"Failed to parse table row {row_idx} in table {table_idx}: {str(e)}")
+        # Fallback if title is missing
+        if title_idx == -1:
+            title_idx = 0
+            
+        for row_idx in range(1, len(rows)):
+            try:
+                cells = [c.text.strip() for c in rows[row_idx].cells]
+                if len(cells) <= title_idx:
                     continue
-    
+                title = cells[title_idx]
+                
+                if title and len(title) > 5 and "說明：" not in title:
+                    dept_text = cells[dept_idx] if (dept_idx != -1 and dept_idx < len(cells)) else ""
+                    detected_dept = detect_department(dept_text + " " + title)
+                    progress = cells[progress_idx] if (progress_idx != -1 and progress_idx < len(cells)) else ""
+                    owner = cells[owner_idx] if (owner_idx != -1 and owner_idx < len(cells)) else (dept_text or "待指派")
+                    
+                    is_cross = False
+                    for word in ["跨部門", "跨組", "跨單位", "協辦"]:
+                        if word in title or word in (progress or ""):
+                            is_cross = True
+                    
+                    parsed.append({
+                        "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-{table_idx}-{row_idx}",
+                        "title": title[:80] + "..." if len(title) > 80 else title,
+                        "dept": detected_dept,
+                        "owner": owner,
+                        "meeting": filename.replace(".docx", ""),
+                        "date": meeting_date,
+                        "status": "completed" if ("完成" in progress or "100%" in progress) else "in_progress",
+                        "priority": "high" if ("高" in title or "立刻" in title) else "medium",
+                        "content": title,
+                        "progress": progress or "自會議記錄匯入",
+                        "is_cross_dept": is_cross
+                    })
+            except Exception as e:
+                import logging
+                logging.warning(f"Failed to parse table row {row_idx} in table {table_idx}: {str(e)}")
+                continue
+                
     # 2. If no tables parsed, parse paragraphs line-by-line
     if not parsed:
         for p_idx, para in enumerate(doc.paragraphs):
@@ -202,6 +263,131 @@ def parse_docx_to_tasks(file_bytes, filename):
                 logging.warning(f"Failed to parse paragraph {p_idx}: {str(e)}")
                 continue
     return parsed
+
+def parse_docx_to_tasks(file_bytes, filename):
+    doc = Document(io.BytesIO(file_bytes))
+    meeting_date = extract_date_from_filename(filename)
+    
+    # Check if Gemini API Key is available
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key and hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        
+    if api_key:
+        try:
+            # Extract all text and table contents from docx
+            full_text = []
+            for p in doc.paragraphs:
+                t = p.text.strip()
+                if t:
+                    full_text.append(t)
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = " | ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
+                    if row_text:
+                        full_text.append(row_text)
+            doc_content = "\n".join(full_text)
+            
+            # Call Gemini API
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
+            prompt = (
+                "你是一個博幼社會福利基金會的專業行政幕僚助理。請從以下會議記錄文本中，提取出所有需要追蹤的「任務/代辦事項」。\n"
+                "請仔細閱讀所有段落與表格。\n\n"
+                "【提取與分類規則】\n"
+                "1. 任務名稱（title）：簡潔有力，代表任務的主題（不超過80個字）。\n"
+                "2. 主責部門（dept）：必須從以下組別中選擇一個最合適的主責組別：\n"
+                "   - \"教材研發組\"\n"
+                "   - \"社工特教組\"\n"
+                "   - \"學區運營組\"\n"
+                "   - \"畢業生組\"\n"
+                "   - \"處長室/行政管理\"\n"
+                "3. 主責對口（owner）：負責該任務的人員名稱，若在文本中沒有提到明確姓名，則填寫「待指派」。\n"
+                "4. 任務狀態（status）：若文本中提到「已完成」、「100%」等，狀態設為 \"completed\"，否則設為 \"in_progress\" 或 \"pending\"。\n"
+                "5. 優先權（priority）：根據文字描述的緊急程度，歸類為 \"high\"（高）、\"medium\"（中）或 \"low\"（低）。若無特別提及，預設為 \"medium\"。\n"
+                "6. 決議細節（content）：該任務的詳細說明與會議決議，請保持完整與準確。\n"
+                "7. 目前進度（progress）：任務的最新進度說明。若文本中無特別說明，預設為「自會議記錄匯入」。\n"
+                "8. 跨部門協作（is_cross_dept）：這是一個布林值（true/false）。如果任務內容包含跨部門合作、協辦、跨組別、多個部門共同負責等特徵，請設為 true，否則設為 false。\n\n"
+                "會議記錄文本如下：\n"
+                "\"\"\"\n"
+                f"{doc_content}\n"
+                "\"\"\""
+            )
+            
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "tasks": {
+                                "type": "ARRAY",
+                                "items": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "title": { "type": "STRING" },
+                                        "dept": { 
+                                            "type": "STRING", 
+                                            "enum": ["教材研發組", "社工特教組", "學區運營組", "畢業生組", "處長室/行政管理"]
+                                        },
+                                        "owner": { "type": "STRING" },
+                                        "status": { 
+                                            "type": "STRING", 
+                                            "enum": ["pending", "in_progress", "completed"] 
+                                        },
+                                        "priority": { 
+                                            "type": "STRING", 
+                                            "enum": ["high", "medium", "low"] 
+                                        },
+                                        "content": { "type": "STRING" },
+                                        "progress": { "type": "STRING" },
+                                        "is_cross_dept": { "type": "BOOLEAN" }
+                                    },
+                                    "required": ["title", "dept", "owner", "status", "priority", "content", "progress", "is_cross_dept"]
+                                }
+                            }
+                        },
+                        "required": ["tasks"]
+                    }
+                }
+            }
+            
+            response = requests.post(url, json=payload, headers=headers, timeout=25)
+            if response.status_code == 200:
+                data = response.json()
+                text_response = data["candidates"][0]["content"]["parts"][0]["text"]
+                raw_tasks = json.loads(text_response).get("tasks", [])
+                
+                # Fill in Python-specific fields
+                parsed = []
+                for i, t in enumerate(raw_tasks):
+                    parsed.append({
+                        "id": f"parsed-{int(pd.Timestamp.now().timestamp())}-ai-{i}",
+                        "title": t["title"],
+                        "dept": t["dept"],
+                        "owner": t["owner"],
+                        "meeting": filename.replace(".docx", ""),
+                        "date": meeting_date,
+                        "status": t["status"],
+                        "priority": t["priority"],
+                        "content": t["content"],
+                        "progress": t["progress"],
+                        "is_cross_dept": t["is_cross_dept"]
+                    })
+                st.toast("🔮 已使用 Gemini API 進行 AI 智慧語意解析！", icon="🔮")
+                return parsed
+        except Exception as e:
+            st.toast("⚠️ Gemini API 呼叫失敗，已自動降級使用本地解析模型。", icon="⚠️")
+            
+    # Local fallback parsing with Heuristic Scoring Model
+    parsed_local = parse_docx_to_tasks_local(file_bytes, filename, meeting_date)
+    st.toast("💡 已使用本機「特徵推斷計分模型」進行解析。", icon="💡")
+    return parsed_local
 
 def html_escape(text):
     """Prevent XSS and HTML layout breakage in markdown cards."""
